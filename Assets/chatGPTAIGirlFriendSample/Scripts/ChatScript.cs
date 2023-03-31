@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
@@ -10,7 +11,7 @@ public class ChatScript : MonoBehaviour
  //API key
 	[SerializeField]private string m_OpenAI_Key="填写你的Key";
 	// 定义Chat API的URL
-	private string m_ApiUrl = "https://api.openai.com/v1/completions";
+	private string m_ApiUrl = "http://3.25.82.134:5000/get_response";
     //配置参数
     [SerializeField]private GetOpenAI.PostData m_PostDataSetting;
     //聊天UI层
@@ -18,35 +19,81 @@ public class ChatScript : MonoBehaviour
     //输入的信息
     [SerializeField]private InputField m_InputWord;
     //返回的信息
-    [SerializeField]private Text m_TextBack;
+    //[SerializeField]private Text m_TextBack;
     //播放设置
-    [SerializeField]private Toggle m_PlayToggle;
+    //[SerializeField]private Toggle m_PlayToggle;
+    
     //微软Azure语音
     [SerializeField]private AzureSpeech m_AzurePlayer;
 
-   //发送信息
+    //NPC
+    [SerializeField]
+    GameObject itemNpc;
+
+    //Player
+    [SerializeField]
+    GameObject itemPlayer;
+
+    [SerializeField]
+    ScrollRect scrollRect;
+
+    Text currentMsgText;
+
+    bool canClick = true;
+
+    //发送信息
     public void SendData()
     {
+        if (!canClick) return;
+
         if(m_InputWord.text.Equals(""))
             return;
 
         //记录聊天
         m_ChatHistory.Add(m_InputWord.text);
 
-        string _msg=m_PostDataSetting.prompt+m_lan+" "+m_InputWord.text;
+        GameObject player = GameObject.Instantiate(itemPlayer, scrollRect.content);
+        player.SetActive(true);
+        ChatItem playerItem = player.GetComponent<ChatItem>();
+        playerItem.msgText.text = m_InputWord.text;
+        //playerItem.msgText.GetComponent<LayoutElement>().preferredWidth = Screen.width - 50;
+
+        GameObject npc = GameObject.Instantiate(itemNpc, scrollRect.content);
+        npc.SetActive(true);
+        ChatItem npcItem = npc.GetComponent<ChatItem>();
+        npcItem.msgText.text = "思考中...";
+        //npcItem.msgText.GetComponent<LayoutElement>().preferredWidth = Screen.width - 50;
+
+        currentMsgText = npcItem.msgText;
+
+        string input = m_InputWord.text;
+        char lastChar = input[input.Length - 1];
+        bool isPunctuation = Char.IsPunctuation(lastChar);
+
+        if(!isPunctuation)
+        {
+            input = input + "。";
+        }
+
+        string _msg =m_PostDataSetting.prompt+m_lan+" "+ input;
         //发送数据
         StartCoroutine (GetPostData (_msg,CallBack));
         m_InputWord.text="";
-        m_TextBack.text="...";
 
-        
+        canClick = false;
+
+        Invoke("DelayScorll", 0.1f);
     }
 
+    public void DelayScorll()
+    {
+        scrollRect.verticalNormalizedPosition = 0;
+    }
 
     //AI回复的信息
     private void CallBack(string _callback){
         _callback=_callback.Trim();
-        m_TextBack.text="";
+        //m_TextBack.text="";
         //开始逐个显示返回的文本
         m_WriteState=true;
         StartCoroutine(SetTextPerWord(_callback));
@@ -54,9 +101,9 @@ public class ChatScript : MonoBehaviour
          //记录聊天
         m_ChatHistory.Add(_callback);
 
-        if(m_PlayToggle.isOn){
+        //if(m_PlayToggle.isOn){
             StartCoroutine(Speek(_callback));
-        }
+        //}
        
 
     }
@@ -70,43 +117,38 @@ public class ChatScript : MonoBehaviour
 
 	private IEnumerator GetPostData(string _postWord,System.Action<string> _callback)
 	{
-        using(UnityWebRequest request = new UnityWebRequest (m_ApiUrl, "POST")){   
-        GetOpenAI.PostData _postData = new GetOpenAI.PostData
-		{
-			model = m_PostDataSetting.model,
-			prompt = _postWord,
-			max_tokens = m_PostDataSetting.max_tokens,
-            temperature=m_PostDataSetting.temperature,
-            top_p=m_PostDataSetting.top_p,
-            frequency_penalty=m_PostDataSetting.frequency_penalty,
-            presence_penalty=m_PostDataSetting.presence_penalty,
-            stop=m_PostDataSetting.stop
-		};
 
-		string _jsonText = JsonUtility.ToJson (_postData);
-		byte[] data = System.Text.Encoding.UTF8.GetBytes (_jsonText);
-		request.uploadHandler = (UploadHandler)new UploadHandlerRaw (data);
-		request.downloadHandler = (DownloadHandler)new DownloadHandlerBuffer ();
 
-		request.SetRequestHeader ("Content-Type","application/json");
-		request.SetRequestHeader("Authorization",string.Format("Bearer {0}",m_OpenAI_Key));
+        WWWForm form = new WWWForm();
+        form.AddField("user_input", _postWord);
+        using (UnityWebRequest request = UnityWebRequest.Post(m_ApiUrl, form))
+        {
+		    yield return request.SendWebRequest ();
 
-		yield return request.SendWebRequest ();
+            canClick = true;
 
-		if (request.responseCode == 200) {
-			string _msg = request.downloadHandler.text;
-			GetOpenAI.TextCallback _textback = JsonUtility.FromJson<GetOpenAI.TextCallback> (_msg);
-			if (_textback!=null && _textback.choices.Count > 0) {
-                    
-                string _backMsg=Regex.Replace(_textback.choices [0].text, @"[\r\n]", "").Replace("？","");
-                _callback(_backMsg);
-			}
-		
-		}
+            if (request.responseCode == 200) 
+            {
+			    string _msg = request.downloadHandler.text;
+
+                _msg = RemoveHtmlTags(_msg);
+
+                _callback(_msg);
+            }
+            else
+            {
+                Debug.LogError($"responseCode:{request.responseCode},error:{request.error}");
+            }
         }
 
 		
 	}
+
+    string RemoveHtmlTags(string html)
+    {
+        var regex = new Regex("<.*?>");
+        return regex.Replace(html, string.Empty);
+    }
 
 
     #region 文字逐个显示
@@ -120,10 +162,12 @@ public class ChatScript : MonoBehaviour
             yield return new WaitForSeconds(m_WordWaitTime);
             currentPos++;
             //更新显示的内容
-            m_TextBack.text=_msg.Substring(0,currentPos);
+            //m_TextBack.text=_msg.Substring(0,currentPos);
+            currentMsgText.text = _msg.Substring(0, currentPos);
 
-            m_WriteState=currentPos<_msg.Length;
+            m_WriteState =currentPos<_msg.Length;
 
+            scrollRect.verticalNormalizedPosition = 0;
         }
     }
 
